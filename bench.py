@@ -295,6 +295,14 @@ def bench(repo, ref_a, ref_b, samples, iterations):
         r = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
         ref_b = r.stdout.strip()
 
+    # Warn if the repo has uncommitted changes (worktrees use committed state)
+    r = git(repo, "status", "--porcelain")
+    if r.stdout.strip():
+        console.print(
+            "[bold yellow]Warning:[/bold yellow] repo has uncommitted changes "
+            "— worktrees will use the last committed state."
+        )
+
     # Build both refs in worktrees (in parallel)
     console.print("[bold]Building...[/bold]")
     builds = {}
