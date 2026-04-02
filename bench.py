@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["click", "rich"]
+# dependencies = ["click", "rich", "tabulate"]
 # ///
 
 """
@@ -25,6 +25,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
+from tabulate import tabulate
 
 console = Console()
 
@@ -213,15 +214,8 @@ def sparkline(values, max_width=30):
     """Generate a sparkline string, downsampling if needed."""
     if not values:
         return ""
-    # Downsample by taking min of each bucket if too many points
     if len(values) > max_width:
-        bucket_size = len(values) / max_width
-        sampled = []
-        for i in range(max_width):
-            start = int(i * bucket_size)
-            end = int((i + 1) * bucket_size)
-            sampled.append(min(values[start:end]))
-        values = sampled
+        values = values[-max_width:]
     mn, mx = min(values), max(values)
     rng = mx - mn if mx > mn else 1
     return "".join(
@@ -277,7 +271,8 @@ def make_live_table(ref_a, ref_b, shas, all_samples, func_names, completed, tota
 @click.argument("ref_b", default=None, required=False)
 @click.option("--samples", default=20, help="Number of interleaved A-B sample pairs.", show_default=True)
 @click.option("--iterations", default=10000, help="Inner loop iterations in C.", show_default=True)
-def bench(repo, ref_a, ref_b, samples, iterations):
+@click.option("--markdown", is_flag=True, help="Print final table as GitHub-flavored markdown.")
+def bench(repo, ref_a, ref_b, samples, iterations, markdown):
     """Benchmark H3 core API across two git refs.
 
     Uses git worktrees so the main checkout is never modified.
@@ -359,6 +354,7 @@ def bench(repo, ref_a, ref_b, samples, iterations):
             table.add_column(ref_b, justify="right")
             table.add_column("Change", justify="right")
 
+            md_rows = []
             for name in func_names:
                 a = statistics.median(all_samples[ref_a][name])
                 b_vals = all_samples[ref_b].get(name)
@@ -374,8 +370,18 @@ def bench(repo, ref_a, ref_b, samples, iterations):
                         style = ""
                     change = f"[{style}]{sign}{pct:.1f}%[/{style}]" if style else f"{sign}{pct:.1f}%"
                     table.add_row(name, f"{a:.4f}us", f"{b:.4f}us", change)
+                    md_rows.append([name, f"{a:.4f}us", f"{b:.4f}us", f"{sign}{pct:.1f}%"])
 
             console.print(table)
+
+            if markdown:
+                console.print()
+                print(tabulate(
+                    md_rows,
+                    headers=["Function", ref_a, ref_b, "Change"],
+                    tablefmt="github",
+                    colalign=("left", "right", "right", "right"),
+                ))
 
     finally:
         for ref in builds:
