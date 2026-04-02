@@ -193,23 +193,21 @@ def build_ref(repo, ref, iterations):
     return sha, bin_path, worktree_dir
 
 
-def run_bench(bin_path, n_runs):
-    """Run benchmark n_runs times, return {name: [us_samples]}."""
-    samples = {}
-    for _ in range(n_runs):
-        r = subprocess.run([bin_path], capture_output=True, text=True)
-        for line in r.stdout.splitlines():
-            m = re.match(r"(\w+):\s+([\d.]+)\s+us/call", line)
-            if m:
-                name, us = m.group(1), float(m.group(2))
-                samples.setdefault(name, []).append(us)
-    return samples
+def run_bench(bin_path):
+    """Run benchmark once, return {name: us}."""
+    results = {}
+    r = subprocess.run([bin_path], capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        m = re.match(r"(\w+):\s+([\d.]+)\s+us/call", line)
+        if m:
+            results[m.group(1)] = float(m.group(2))
+    return results
 
 
 def collect_results(into, new):
-    """Append new samples into accumulated sample lists."""
-    for name, values in new.items():
-        into.setdefault(name, []).extend(values)
+    """Append new sample into accumulated sample lists."""
+    for name, us in new.items():
+        into.setdefault(name, []).append(us)
 
 
 @click.command()
@@ -266,9 +264,9 @@ def bench(repo, ref_a, ref_b, samples, iterations):
             for ref in [ref_a, ref_b]:
                 bin_path = builds[ref][0]
                 click.echo(f"  {ref}:")
-                result = run_bench(bin_path, 1)
-                for name, values in result.items():
-                    click.echo(f"    {name}: {values[0]:.4f} us/call")
+                result = run_bench(bin_path)
+                for name, us in result.items():
+                    click.echo(f"    {name}: {us:.4f} us/call")
                 if not is_warmup:
                     collect_results(all_samples[ref], result)
 
