@@ -229,6 +229,15 @@ def run_bench(bin_path):
     return results
 
 
+def sample_timings(repo, bin_path, worktree_dir):
+    """Yield timing dicts from a benchmark binary. Cleans up worktree on close."""
+    try:
+        while True:
+            yield run_bench(bin_path)
+    finally:
+        git(repo, "worktree", "remove", "--force", worktree_dir)
+
+
 def sparkline(values, max_width=30):
     """Generate a sparkline string, downsampling if needed."""
     if not values:
@@ -315,7 +324,7 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
 
     # Build both refs in worktrees (in parallel)
     console.print("[bold]Building...[/bold]")
-    builds = {}
+    generators = {}
     try:
         shas = {}
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -325,34 +334,29 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
             }
             for ref in [ref_a, ref_b]:
                 sha, bin_path, worktree_dir = futures[ref].result()
-                builds[ref] = (bin_path, worktree_dir)
                 shas[ref] = sha
+                generators[ref] = sample_timings(repo, bin_path, worktree_dir)
                 console.print(f"  {ref} ({sha})")
 
         # Run interleaved A-B samples with live TUI
         all_samples = {ref_a: {}, ref_b: {}}
         func_names = None
-        completed = 0
 
         with Live(console=console, refresh_per_second=2) as live:
-            for pair_num in range(samples):
+            for completed in range(1, samples + 1):
                 for ref in [ref_a, ref_b]:
-                    bin_path = builds[ref][0]
-                    result = run_bench(bin_path)
-
+                    result = next(generators[ref])
                     if func_names is None:
                         func_names = list(result.keys())
-
                     for name, us in result.items():
                         all_samples[ref].setdefault(name, []).append(us)
 
-                completed += 1
                 live.update(
                     make_live_table(
                         ref_a, ref_b, shas, all_samples,
                         func_names or [], completed, samples
-                        )
                     )
+                )
 
         # Final report
         if all_samples[ref_a] and all_samples[ref_b]:
@@ -399,9 +403,8 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
                 print(f"\n{ref_a}={shas[ref_a]}  {ref_b}={shas[ref_b]}  bench={bench_sha}")
 
     finally:
-        for ref in builds:
-            worktree_dir = builds[ref][1]
-            git(repo, "worktree", "remove", "--force", worktree_dir)
+        for gen in generators.values():
+            gen.close()
 
     elapsed = time.monotonic() - t0
     console.print(f"\n[dim]Completed in {elapsed:.0f}s[/dim]")
