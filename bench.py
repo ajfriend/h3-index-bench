@@ -337,6 +337,8 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
         )
 
     # Build both refs in worktrees (in parallel)
+    bench_sha = script_sha()
+    console.print(f"  bench ({bench_sha})")
     console.print("[bold]Building...[/bold]")
     with contextlib.ExitStack() as cleanup:
         shas = {}
@@ -381,7 +383,7 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
             console.print()
             table = Table(
                 title=f"[bold]Comparison (median of {samples} samples)[/bold]",
-                caption=f"{ref_a}={shas[ref_a]}  {ref_b}={shas[ref_b]}",
+                caption=f"{ref_a}={shas[ref_a]}  {ref_b}={shas[ref_b]}  bench={bench_sha}",
                 border_style="bold",
             )
             table.add_column("Function", style="bold", min_width=26)
@@ -398,7 +400,6 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
             console.print(table)
 
             if markdown:
-                bench_sha = script_sha()
                 md_rows = [
                     [r["name"], f"{r['a']:.4f}us", f"{r['b']:.4f}us",
                      f"{'+'if r['pct'] > 0 else ''}{r['pct']:.1f}%"]
