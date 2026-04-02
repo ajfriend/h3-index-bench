@@ -11,6 +11,7 @@ modifying the repo. Uses git worktrees so the main checkout is never
 touched.
 """
 
+import contextlib
 import os
 import re
 import shutil
@@ -29,8 +30,6 @@ from rich.text import Text
 from tabulate import tabulate
 
 console = Console()
-
-SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 BENCHMARK_C_TEMPLATE = r"""
 #include <stdio.h>
@@ -229,17 +228,15 @@ def run_bench(bin_path):
     return results
 
 
-def sample_timings(repo, bin_path, worktree_dir):
-    """Yield timing dicts from a benchmark binary. Cleans up worktree on close."""
-    try:
-        while True:
-            yield run_bench(bin_path)
-    finally:
-        git(repo, "worktree", "remove", "--force", worktree_dir)
+def sample_timings(bin_path):
+    """Yield timing dicts from a benchmark binary forever."""
+    while True:
+        yield run_bench(bin_path)
 
 
 def sparkline(values, max_width=30):
     """Generate a sparkline string, downsampling if needed."""
+    chars = "▁▂▃▄▅▆▇█"
     if not values:
         return ""
     if len(values) > max_width:
@@ -247,9 +244,33 @@ def sparkline(values, max_width=30):
     mn, mx = min(values), max(values)
     rng = mx - mn if mx > mn else 1
     return "".join(
-        SPARK_CHARS[min(int((v - mn) / rng * (len(SPARK_CHARS) - 1)), len(SPARK_CHARS) - 1)]
+        chars[min(int((v - mn) / rng * (len(chars) - 1)), len(chars) - 1)]
         for v in values
     )
+
+
+def style_pct(pct):
+    """Return a styled Text object for a percentage change."""
+    sign = "+" if pct > 0 else ""
+    label = f"{sign}{pct:.1f}%"
+    if pct < -1:
+        return Text(label, style="bold green")
+    elif pct > 1:
+        return Text(label, style="bold red")
+    return Text(label, style="dim")
+
+
+def compute_comparison(func_names, all_samples, ref_a, ref_b):
+    """Compute per-function comparison data from collected samples."""
+    rows = []
+    for name in func_names:
+        a = statistics.median(all_samples[ref_a][name])
+        b_vals = all_samples[ref_b].get(name)
+        if b_vals is not None:
+            b = statistics.median(b_vals)
+            pct = (b - a) / a * 100
+            rows.append({"name": name, "a": a, "b": b, "pct": pct})
+    return rows
 
 
 def make_live_table(ref_a, ref_b, shas, all_samples, func_names, completed, total):
@@ -267,24 +288,17 @@ def make_live_table(ref_a, ref_b, shas, all_samples, func_names, completed, tota
         a_samples = all_samples.get(ref_a, {}).get(name, [])
         b_samples = all_samples.get(ref_b, {}).get(name, [])
 
-        a_med = f"{statistics.median(a_samples):.4f}" if a_samples else "—"
-        b_med = f"{statistics.median(b_samples):.4f}" if b_samples else "—"
+        a_val = statistics.median(a_samples) if a_samples else None
+        b_val = statistics.median(b_samples) if b_samples else None
+
+        a_med = f"{a_val:.4f}" if a_val is not None else "—"
+        b_med = f"{b_val:.4f}" if b_val is not None else "—"
 
         a_spark = Text(sparkline(a_samples), style="cyan")
         b_spark = Text(sparkline(b_samples), style="magenta")
 
-        if a_samples and b_samples:
-            a_val = statistics.median(a_samples)
-            b_val = statistics.median(b_samples)
-            pct = (b_val - a_val) / a_val * 100
-            sign = "+" if pct > 0 else ""
-            if pct < -1:
-                style = "bold green"
-            elif pct > 1:
-                style = "bold red"
-            else:
-                style = "dim"
-            change = Text(f"{sign}{pct:.1f}%", style=style)
+        if a_val is not None and b_val is not None:
+            change = style_pct((b_val - a_val) / a_val * 100)
         else:
             change = Text("—", style="dim")
 
@@ -324,9 +338,9 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
 
     # Build both refs in worktrees (in parallel)
     console.print("[bold]Building...[/bold]")
-    generators = {}
-    try:
+    with contextlib.ExitStack() as cleanup:
         shas = {}
+        generators = {}
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {
                 ref: pool.submit(build_ref, repo, ref, iterations)
@@ -335,7 +349,10 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
             for ref in [ref_a, ref_b]:
                 sha, bin_path, worktree_dir = futures[ref].result()
                 shas[ref] = sha
-                generators[ref] = sample_timings(repo, bin_path, worktree_dir)
+                cleanup.callback(
+                    lambda wd=worktree_dir: git(repo, "worktree", "remove", "--force", wd)
+                )
+                generators[ref] = sample_timings(bin_path)
                 console.print(f"  {ref} ({sha})")
 
         # Run interleaved A-B samples with live TUI
@@ -359,7 +376,8 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
                 )
 
         # Final report
-        if all_samples[ref_a] and all_samples[ref_b]:
+        comparison = compute_comparison(func_names or [], all_samples, ref_a, ref_b)
+        if comparison:
             console.print()
             table = Table(
                 title=f"[bold]Comparison (median of {samples} samples)[/bold]",
@@ -371,28 +389,21 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
             table.add_column(ref_b, justify="right")
             table.add_column("Change", justify="right")
 
-            md_rows = []
-            for name in func_names:
-                a = statistics.median(all_samples[ref_a][name])
-                b_vals = all_samples[ref_b].get(name)
-                if b_vals is not None:
-                    b = statistics.median(b_vals)
-                    pct = (b - a) / a * 100
-                    sign = "+" if pct > 0 else ""
-                    if pct < -1:
-                        style = "bold green"
-                    elif pct > 1:
-                        style = "bold red"
-                    else:
-                        style = ""
-                    change = f"[{style}]{sign}{pct:.1f}%[/{style}]" if style else f"{sign}{pct:.1f}%"
-                    table.add_row(name, f"{a:.4f}us", f"{b:.4f}us", change)
-                    md_rows.append([name, f"{a:.4f}us", f"{b:.4f}us", f"{sign}{pct:.1f}%"])
+            for row in comparison:
+                table.add_row(
+                    row["name"], f"{row['a']:.4f}us", f"{row['b']:.4f}us",
+                    style_pct(row["pct"]),
+                )
 
             console.print(table)
 
             if markdown:
                 bench_sha = script_sha()
+                md_rows = [
+                    [r["name"], f"{r['a']:.4f}us", f"{r['b']:.4f}us",
+                     f"{'+'if r['pct'] > 0 else ''}{r['pct']:.1f}%"]
+                    for r in comparison
+                ]
                 console.print()
                 print(tabulate(
                     md_rows,
@@ -401,10 +412,6 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
                     colalign=("left", "right", "right", "right"),
                 ))
                 print(f"\n{ref_a}={shas[ref_a]}  {ref_b}={shas[ref_b]}  bench={bench_sha}")
-
-    finally:
-        for gen in generators.values():
-            gen.close()
 
     elapsed = time.monotonic() - t0
     console.print(f"\n[dim]Completed in {elapsed:.0f}s[/dim]")
