@@ -337,17 +337,18 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
         )
 
     # Build both refs in worktrees (in parallel)
-    bench_sha = script_sha()
-    console.print(f"  bench ({bench_sha})")
     console.print("[bold]Building...[/bold]")
     with contextlib.ExitStack() as cleanup:
         shas = {}
         generators = {}
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            bench_sha_future = pool.submit(script_sha)
             futures = {
                 ref: pool.submit(build_ref, repo, ref, iterations)
                 for ref in [ref_a, ref_b]
             }
+            bench_sha = bench_sha_future.result()
+            console.print(f"  bench ({bench_sha})")
             for ref in [ref_a, ref_b]:
                 sha, bin_path, worktree_dir = futures[ref].result()
                 shas[ref] = sha
