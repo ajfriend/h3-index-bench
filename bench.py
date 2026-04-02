@@ -153,7 +153,7 @@ def build_ref(repo, ref, iterations):
     """Create worktree for ref, build library, compile benchmark."""
     sha = get_sha(repo, ref)
 
-    worktree_dir = tempfile.mkdtemp(prefix=f"h3bench-{ref}-")
+    worktree_dir = tempfile.mkdtemp(prefix=f"h3bench-{ref.replace('/', '-')}-")
     r = git(repo, "worktree", "add", "--detach", worktree_dir, ref)
     if r.returncode != 0:
         shutil.rmtree(worktree_dir)
