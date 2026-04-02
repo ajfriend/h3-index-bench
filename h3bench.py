@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["click"]
+# dependencies = ["click", "rich"]
 # ///
 
 """
@@ -21,6 +21,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import click
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.text import Text
+
+console = Console()
+
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 BENCHMARK_C_TEMPLATE = r"""
 #include <stdio.h>
@@ -142,8 +153,7 @@ def get_sha(repo, ref):
 
 
 def build_ref(repo, ref, iterations):
-    """Create worktree for ref, build library, compile benchmark.
-    Returns (sha, bin_path, worktree_dir)."""
+    """Create worktree for ref, build library, compile benchmark."""
     sha = get_sha(repo, ref)
 
     worktree_dir = tempfile.mkdtemp(prefix=f"h3bench-{ref}-")
@@ -152,7 +162,6 @@ def build_ref(repo, ref, iterations):
         shutil.rmtree(worktree_dir)
         raise click.ClickException(f"worktree failed for {ref}: {r.stderr.strip()}")
 
-    # Build library
     build_dir = os.path.join(worktree_dir, "build")
     os.makedirs(build_dir)
     r = subprocess.run(
@@ -163,7 +172,6 @@ def build_ref(repo, ref, iterations):
         git(repo, "worktree", "remove", "--force", worktree_dir)
         raise click.ClickException(f"build failed for {ref}:\n{r.stderr[-500:]}")
 
-    # Compile benchmark
     c_source = BENCHMARK_C_TEMPLATE.format(
         iterations=iterations, iterations_forward=iterations * 5
     )
@@ -204,10 +212,66 @@ def run_bench(bin_path):
     return results
 
 
-def collect_results(into, new):
-    """Append new sample into accumulated sample lists."""
-    for name, us in new.items():
-        into.setdefault(name, []).append(us)
+def sparkline(values, max_width=30):
+    """Generate a sparkline string, downsampling if needed."""
+    if not values:
+        return ""
+    # Downsample by taking min of each bucket if too many points
+    if len(values) > max_width:
+        bucket_size = len(values) / max_width
+        sampled = []
+        for i in range(max_width):
+            start = int(i * bucket_size)
+            end = int((i + 1) * bucket_size)
+            sampled.append(min(values[start:end]))
+        values = sampled
+    mn, mx = min(values), max(values)
+    rng = mx - mn if mx > mn else 1
+    return "".join(
+        SPARK_CHARS[min(int((v - mn) / rng * (len(SPARK_CHARS) - 1)), len(SPARK_CHARS) - 1)]
+        for v in values
+    )
+
+
+def make_live_table(ref_a, ref_b, shas, all_samples, func_names, completed, total):
+    """Build the rich table for live display."""
+    table = Table(title=f"h3bench — sample {completed}/{total}", border_style="dim")
+    table.add_column("Function", style="bold", min_width=26)
+    table.add_column(f"{ref_a}\n({shas[ref_a]})", justify="right", min_width=10)
+    spark_width = min(total, 30)
+    table.add_column("", justify="left", min_width=spark_width, max_width=spark_width)
+    table.add_column(f"{ref_b}\n({shas[ref_b]})", justify="right", min_width=10)
+    table.add_column("", justify="left", min_width=spark_width, max_width=spark_width)
+    table.add_column("Change", justify="right", min_width=9)
+
+    for name in func_names:
+        a_samples = all_samples.get(ref_a, {}).get(name, [])
+        b_samples = all_samples.get(ref_b, {}).get(name, [])
+
+        a_med = f"{statistics.median(a_samples):.4f}" if a_samples else "—"
+        b_med = f"{statistics.median(b_samples):.4f}" if b_samples else "—"
+
+        a_spark = Text(sparkline(a_samples), style="cyan")
+        b_spark = Text(sparkline(b_samples), style="magenta")
+
+        if a_samples and b_samples:
+            a_val = statistics.median(a_samples)
+            b_val = statistics.median(b_samples)
+            pct = (b_val - a_val) / a_val * 100
+            sign = "+" if pct > 0 else ""
+            if pct < -1:
+                style = "bold green"
+            elif pct > 1:
+                style = "bold red"
+            else:
+                style = "dim"
+            change = Text(f"{sign}{pct:.1f}%", style=style)
+        else:
+            change = Text("—", style="dim")
+
+        table.add_row(name, a_med, a_spark, b_med, b_spark, change)
+
+    return table
 
 
 @click.command()
@@ -232,7 +296,7 @@ def bench(repo, ref_a, ref_b, samples, iterations):
         ref_b = r.stdout.strip()
 
     # Build both refs in worktrees (in parallel)
-    click.echo("Building...")
+    console.print("[bold]Building...[/bold]")
     builds = {}
     try:
         shas = {}
@@ -245,67 +309,76 @@ def bench(repo, ref_a, ref_b, samples, iterations):
                 sha, bin_path, worktree_dir = futures[ref].result()
                 builds[ref] = (bin_path, worktree_dir)
                 shas[ref] = sha
-                click.echo(f"  {ref} ({sha})")
+                console.print(f"  {ref} ({sha})")
 
-        # Run interleaved A-B samples
+        # Run interleaved A-B samples with live TUI
         total_pairs = samples + (1 if samples > 1 else 0)
         all_samples = {ref_a: {}, ref_b: {}}
+        func_names = None
+        completed = 0
 
-        for pair_num in range(total_pairs):
-            is_warmup = samples > 1 and pair_num == 0
+        with Live(console=console, refresh_per_second=2) as live:
+            for pair_num in range(total_pairs):
+                is_warmup = samples > 1 and pair_num == 0
 
-            click.secho(f"\n{'='*50}", dim=True)
-            if is_warmup:
-                click.secho("WARMUP (discarded)", dim=True)
-            else:
-                click.echo(f"Sample {pair_num} of {samples}")
-            click.secho(f"{'='*50}", dim=True)
+                for ref in [ref_a, ref_b]:
+                    bin_path = builds[ref][0]
+                    result = run_bench(bin_path)
 
-            for ref in [ref_a, ref_b]:
-                bin_path = builds[ref][0]
-                click.echo(f"  {ref}:")
-                result = run_bench(bin_path)
-                for name, us in result.items():
-                    click.echo(f"    {name}: {us:.4f} us/call")
-                if not is_warmup:
-                    collect_results(all_samples[ref], result)
+                    if func_names is None:
+                        func_names = list(result.keys())
 
-        # Report using median
-        if all_samples[ref_a] and all_samples[ref_b]:
-            click.echo()
-            click.secho(f"{'='*60}", bold=True)
-            click.secho(f"Comparison (median of {samples} samples)", bold=True)
-            click.echo(f"  {ref_a} = {shas[ref_a]}")
-            click.echo(f"  {ref_b} = {shas[ref_b]}")
-            click.secho(f"{'='*60}", bold=True)
-            click.echo(f"{'Function':<28} {ref_a:>12} {ref_b:>12} {'Change':>10}")
-            click.secho(f"{'-'*28} {'-'*12} {'-'*12} {'-'*10}", dim=True)
-            for name in all_samples[ref_a]:
-                a = statistics.median(all_samples[ref_a][name])
-                b_samples = all_samples[ref_b].get(name)
-                if b_samples is not None:
-                    b = statistics.median(b_samples)
-                    pct = (b - a) / a * 100
-                    if pct < -1:
-                        color = "green"
-                    elif pct > 1:
-                        color = "red"
-                    else:
-                        color = None
-                    sign = "+" if pct > 0 else ""
-                    pct_str = click.style(f"{sign}{pct:>8.1f}%", fg=color)
-                    click.echo(
-                        f"{name:<28} {a:>10.4f}us {b:>10.4f}us {pct_str}"
+                    if not is_warmup:
+                        for name, us in result.items():
+                            all_samples[ref].setdefault(name, []).append(us)
+                        if ref == ref_b:
+                            completed += 1
+
+                    live.update(
+                        make_live_table(
+                            ref_a, ref_b, shas, all_samples,
+                            func_names or [], completed, samples
+                        )
                     )
 
+        # Final report
+        if all_samples[ref_a] and all_samples[ref_b]:
+            console.print()
+            table = Table(
+                title=f"[bold]Comparison (median of {samples} samples)[/bold]",
+                caption=f"{ref_a}={shas[ref_a]}  {ref_b}={shas[ref_b]}",
+                border_style="bold",
+            )
+            table.add_column("Function", style="bold", min_width=26)
+            table.add_column(ref_a, justify="right")
+            table.add_column(ref_b, justify="right")
+            table.add_column("Change", justify="right")
+
+            for name in func_names:
+                a = statistics.median(all_samples[ref_a][name])
+                b_vals = all_samples[ref_b].get(name)
+                if b_vals is not None:
+                    b = statistics.median(b_vals)
+                    pct = (b - a) / a * 100
+                    sign = "+" if pct > 0 else ""
+                    if pct < -1:
+                        style = "bold green"
+                    elif pct > 1:
+                        style = "bold red"
+                    else:
+                        style = ""
+                    change = f"[{style}]{sign}{pct:.1f}%[/{style}]" if style else f"{sign}{pct:.1f}%"
+                    table.add_row(name, f"{a:.4f}us", f"{b:.4f}us", change)
+
+            console.print(table)
+
     finally:
-        # Cleanup worktrees
         for ref in builds:
             worktree_dir = builds[ref][1]
             git(repo, "worktree", "remove", "--force", worktree_dir)
 
     elapsed = time.monotonic() - t0
-    click.secho(f"\nCompleted in {elapsed:.0f}s", dim=True)
+    console.print(f"\n[dim]Completed in {elapsed:.0f}s[/dim]")
 
 
 if __name__ == "__main__":
