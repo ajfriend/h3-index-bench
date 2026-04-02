@@ -18,6 +18,7 @@ import statistics
 import subprocess
 import tempfile
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import click
@@ -137,10 +138,28 @@ int main(void) {{
 """
 
 
+SCRIPT_REPO = "ajfriend/h3-index-bench"
+
+
 def git(repo, *args):
     return subprocess.run(
         ["git", *args], capture_output=True, text=True, cwd=repo
     )
+
+
+def script_sha():
+    """Get the commit SHA of this script, via local git or the GitHub API."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    r = git(script_dir, "rev-parse", "--short", "HEAD")
+    if r.returncode == 0:
+        return r.stdout.strip()
+    try:
+        url = f"https://api.github.com/repos/{SCRIPT_REPO}/commits/main"
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.sha"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.read(7).decode()
+    except Exception:
+        return "unknown"
 
 
 def get_sha(repo, ref):
@@ -375,6 +394,7 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
             console.print(table)
 
             if markdown:
+                bench_sha = script_sha()
                 console.print()
                 print(tabulate(
                     md_rows,
@@ -382,6 +402,7 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
                     tablefmt="github",
                     colalign=("left", "right", "right", "right"),
                 ))
+                print(f"\n{ref_a}={shas[ref_a]}  {ref_b}={shas[ref_b]}  bench={bench_sha}")
 
     finally:
         for ref in builds:
