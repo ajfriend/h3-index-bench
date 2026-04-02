@@ -36,15 +36,7 @@ uv run h3bench.py <h3-repo> <ref-a> [ref-b]
 | `--samples`    | 20      | Number of interleaved A/B sample pairs |
 | `--iterations` | 10000   | Inner loop iterations in C benchmark   |
 
-### Examples
-
-Run directly from GitHub:
-
-```
-uv run https://raw.githubusercontent.com/ajfriend/h3-index-bench/main/bench.py ~/work/h3 master vec3d-core
-```
-
-Or from a local clone:
+### Example from a local clone
 
 ```
 uv run bench.py ~/src/h3 v4.1.0 main --samples 30
