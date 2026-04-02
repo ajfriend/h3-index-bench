@@ -296,7 +296,6 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
 
     Uses git worktrees so the main checkout is never modified.
     Builds each ref once, then runs interleaved A-B samples.
-    The first sample pair is discarded as warmup when samples > 1.
     Reports the median.
     """
     t0 = time.monotonic()
@@ -331,15 +330,12 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
                 console.print(f"  {ref} ({sha})")
 
         # Run interleaved A-B samples with live TUI
-        total_pairs = samples + (1 if samples > 1 else 0)
         all_samples = {ref_a: {}, ref_b: {}}
         func_names = None
         completed = 0
 
         with Live(console=console, refresh_per_second=2) as live:
-            for pair_num in range(total_pairs):
-                is_warmup = samples > 1 and pair_num == 0
-
+            for pair_num in range(samples):
                 for ref in [ref_a, ref_b]:
                     bin_path = builds[ref][0]
                     result = run_bench(bin_path)
@@ -347,16 +343,14 @@ def bench(repo, ref_a, ref_b, samples, iterations, markdown):
                     if func_names is None:
                         func_names = list(result.keys())
 
-                    if not is_warmup:
-                        for name, us in result.items():
-                            all_samples[ref].setdefault(name, []).append(us)
-                        if ref == ref_b:
-                            completed += 1
+                    for name, us in result.items():
+                        all_samples[ref].setdefault(name, []).append(us)
 
-                    live.update(
-                        make_live_table(
-                            ref_a, ref_b, shas, all_samples,
-                            func_names or [], completed, samples
+                completed += 1
+                live.update(
+                    make_live_table(
+                        ref_a, ref_b, shas, all_samples,
+                        func_names or [], completed, samples
                         )
                     )
 
